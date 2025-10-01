@@ -1,0 +1,196 @@
+if __name__ == "__main__":
+  from logging_config import configure_logging
+
+  configure_logging()
+
+import logging
+import sys
+import traceback
+from datetime import datetime, timedelta, timezone
+from traceback import format_tb
+
+import apscheduler.executors.base as exec_base
+from apscheduler.events import (
+  EVENT_JOB_ADDED,
+  EVENT_JOB_ERROR,
+  EVENT_JOB_EXECUTED,
+  EVENT_JOB_MISSED,
+  JobEvent,
+  JobExecutionEvent,
+)
+from apscheduler.jobstores.base import ConflictingIdError
+from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.base import STATE_RUNNING
+from environment_init_vars import TZ
+
+DO_NOT_LOG_JOBS = ["submit_queued_writes_to_pool"]
+
+
+def run_job(job, jobstore_alias, run_times, logger_name):
+  """
+  Called by executors to run the job. Returns a list of scheduler events to be dispatched by the
+  scheduler.
+
+  """
+  events = []
+  logger = logging.getLogger(logger_name)
+  for run_time in run_times:
+    # See if the job missed its run time window, and handle
+    # possible misfires accordingly
+    if job.misfire_grace_time is not None:
+      difference = datetime.now(timezone.utc) - run_time
+      grace_time = timedelta(seconds=job.misfire_grace_time)
+      if difference > grace_time:
+        events.append(JobExecutionEvent(EVENT_JOB_MISSED, job.id, jobstore_alias, run_time))
+        logger.warning(f'Run time of job "{job.id}" was missed by {difference}')
+        continue
+
+    if job.id not in DO_NOT_LOG_JOBS:
+      logger.info(f'Running job "{job.id}" (scheduled at {run_time})')
+    else:
+      logger.debug(f'Running job "{job.id}" (scheduled at {run_time})')
+    try:
+      retval = job.func(*job.args, **job.kwargs)
+    except BaseException:
+      exc, tb = sys.exc_info()[1:]
+      formatted_tb = "".join(format_tb(tb))
+      events.append(
+        JobExecutionEvent(
+          EVENT_JOB_ERROR,
+          job.id,
+          jobstore_alias,
+          run_time,
+          exception=exc,
+          traceback=formatted_tb,
+        )
+      )
+      logger.exception(f'Job "{job.id}" raised an exception')
+
+      # This is to prevent cyclic references that would lead to memory leaks
+      traceback.clear_frames(tb)
+      del tb
+    else:
+      events.append(JobExecutionEvent(EVENT_JOB_EXECUTED, job.id, jobstore_alias, run_time, retval=retval))
+      # if job.id not in DO_NOT_LOG_JOBS:
+      #   logger.info(f'Job "{job.id}" executed successfully')
+      # else:
+      #   logger.debug(f'Job "{job.id}" executed successfully')
+
+  return events
+
+
+async def run_coroutine_job(job, jobstore_alias, run_times, logger_name):
+  """Coroutine version of run_job()."""
+  events = []
+  logger = logging.getLogger(logger_name)
+  for run_time in run_times:
+    # See if the job missed its run time window, and handle possible misfires accordingly
+    if job.misfire_grace_time is not None:
+      difference = datetime.now(timezone.utc) - run_time
+      grace_time = timedelta(seconds=job.misfire_grace_time)
+      if difference > grace_time:
+        events.append(JobExecutionEvent(EVENT_JOB_MISSED, job.id, jobstore_alias, run_time))
+        logger.warning(f'Run time of job "{job.id}" was missed by {difference}')
+        continue
+
+    if job.id not in DO_NOT_LOG_JOBS:
+      logger.info(f'Running job "{job.id}" (scheduled at {run_time})')
+    else:
+      logger.debug(f'Running job "{job.id}" (scheduled at {run_time})')
+    try:
+      retval = await job.func(*job.args, **job.kwargs)
+    except BaseException:
+      exc, tb = sys.exc_info()[1:]
+      formatted_tb = "".join(format_tb(tb))
+      events.append(
+        JobExecutionEvent(
+          EVENT_JOB_ERROR,
+          job.id,
+          jobstore_alias,
+          run_time,
+          exception=exc,
+          traceback=formatted_tb,
+        )
+      )
+      logger.exception(f'Job "{job.id}" raised an exception')
+      traceback.clear_frames(tb)
+    else:
+      events.append(JobExecutionEvent(EVENT_JOB_EXECUTED, job.id, jobstore_alias, run_time, retval=retval))
+      # if job.id not in DO_NOT_LOG_JOBS:
+      #   logger.info(f'Job "{job.id}" executed successfully')
+      # else:
+      #   logger.debug(f'Job "{job.id}" executed successfully')
+
+  return events
+
+
+exec_base.run_job = run_job
+exec_base.run_coroutine_job = run_coroutine_job
+
+
+class OrderProcessingScheduler(AsyncIOScheduler):
+  @classmethod
+  def init_scheduler(cls) -> "OrderProcessingScheduler":
+    # engine = create_engine(r"sqlite:///scheduler.db")
+
+    job_stores = {
+      # "default": TestJobStore(engine=engine, tablename="apscheduler_jobs", pickle_protocol=HIGHEST_PROTOCOL),
+      "default": MemoryJobStore(),
+    }
+
+    job_defaults = {
+      "misfire_grace_time": 60,
+      "coalesce": True,
+    }
+
+    return cls(
+      jobstores=job_stores,
+      job_defaults=job_defaults,
+      daemon=False,
+      timezone=TZ,
+    )
+
+  def _real_add_job(self, job, jobstore_alias, replace_existing):
+    """
+    :param Job job: the job to add
+    :param bool replace_existing: ``True`` to use update_job() in case the job already exists
+        in the store
+
+    """
+    # Fill in undefined values with defaults
+    replacements = {}
+    for key, value in self._job_defaults.items():
+      if not hasattr(job, key):
+        replacements[key] = value
+
+    # Calculate the next run time if there is none defined
+    if not hasattr(job, "next_run_time"):
+      now = datetime.now(self.timezone)
+      replacements["next_run_time"] = job.trigger.get_next_fire_time(None, now)
+
+    # Apply any replacements
+    job._modify(**replacements)
+
+    # Add the job to the given job store
+    store = self._lookup_jobstore(jobstore_alias)
+    try:
+      store.add_job(job)
+    except ConflictingIdError:
+      if replace_existing:
+        store.update_job(job)
+      else:
+        raise
+
+    # Mark the job as no longer pending
+    job._jobstore_alias = jobstore_alias
+
+    # Notify listeners that a new job has been added
+    event = JobEvent(EVENT_JOB_ADDED, job.id, jobstore_alias)
+    self._dispatch_event(event)
+
+    self._logger.info(f'Added job "{job.id}" to job store')
+
+    # Notify the scheduler about the new job
+    if self.state == STATE_RUNNING:
+      self.wakeup()
