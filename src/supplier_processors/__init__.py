@@ -1,8 +1,9 @@
+import contextlib
 from asyncio import gather, to_thread
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from ftplib import FTP
+from ftplib import FTP, _SSLSocket  # type: ignore
 from json import dump, loads
 from logging import getLogger
 from pathlib import Path, PurePosixPath
@@ -36,18 +37,20 @@ class FileRegisterData:
   dropoff_date: datetime
   file_pattern: Pattern[str]
   current_week: bool
-  _waiting_folder: Path
+  _waiting_folder: PurePosixPath
 
   file_name: list[str] = field(default_factory=list)
   pickup_success: dict[int, bool] = field(default_factory=dict)
   application_success: dict[int, bool] = field(default_factory=dict)
 
   @property
-  def file_loc(self) -> list[Path]:
+  def file_loc(self) -> list[PurePosixPath]:
     return [self._waiting_folder / name for name in self.file_name]
 
 
-class SupplierProcessorBase(metaclass=SingletonType):
+class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
+  vendor_ftp: T_VendorFTP
+
   file_pickup_queue: dict[str, FileRegisterData] = {}
   file_waiting_queue: dict[str, FileRegisterData] = {}
   file_application_queue: dict[str, FileRegisterData] = {}
@@ -61,10 +64,10 @@ class SupplierProcessorBase(metaclass=SingletonType):
   lock: Lock = Lock()
 
   pickup_ftp_creds: dict
-  destination_ftp_creds: dict = loads(SFT_WEBSITE_CREDS_FILE.read_text())
+  sft_ftp_creds: dict = loads(SFT_WEBSITE_CREDS_FILE.read_text())
 
   pickup_ftp_folder: PurePosixPath
-  waiting_folder: Path
+  waiting_folder: PurePosixPath
   destination_ftp_folder: PurePosixPath
 
   def __init__(self, pbar: ProgressCustom = None) -> None:  # type: ignore
@@ -74,7 +77,6 @@ class SupplierProcessorBase(metaclass=SingletonType):
     self.waiting_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_waiting_queue.json"
     self.application_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_application_queue.json"
 
-    self.waiting_folder.mkdir(exist_ok=True)
     self.pbar = pbar
 
     self._load_queue_backups()
@@ -154,66 +156,81 @@ class SupplierProcessorBase(metaclass=SingletonType):
 
   async def pickup_files(self) -> None: ...
 
-  def _dropoff_file(
-    self,
-    local_path: Path,
-    destination_path: str,
-    total_downloads_task: CustomTaskID,
-    file_meta: FileRegisterData,
-    idx: int,
-  ):
-    with SFTFTPClient(self.destination_ftp_creds) as ftp:
-      ftp.voidcmd("TYPE I")
-
-      with self.pbar.add_task(f"Uploading {local_path.name}") as upload_task:
-        with local_path.open("rb") as file:
-          ftp.storbinary(cmd=f"STOR {destination_path}", fp=file, callback=advance_pbar(self.pbar, upload_task))
-
-      success = False
-      try:
-        ftp.size(destination_path)
-        success = True
-      except Exception:
-        pass
-
-      file_meta.application_success[idx] = success
-
-      logger.info(f"Uploaded {local_path.name} to {destination_path}")
-      self.pbar.update(total_downloads_task, advance=1)
-
   async def dropoff_files(self) -> None:
-    if self.file_application_queue:
-      async with self.lock:
-        total_downloads_task = self.pbar.add_task("Total Uploads", total=len(self.file_application_queue))
-
+    if not self.file_application_queue:
+      return
+    async with self.lock:
+      with self.pbar.add_task(
+        "Moving files to application folder", total=sum(len(v.file_name) for v in self.file_application_queue.values())
+      ) as files_move_task:
         futures = []
         for key, file_meta in tuple(self.file_application_queue.items()):
-          for idx, local_path in enumerate(file_meta.file_loc):
-            futures.append(
-              to_thread(
-                self._dropoff_file,
-                local_path=local_path,
-                destination_path=(self.destination_ftp_folder / local_path.name).as_posix(),
-                total_downloads_task=total_downloads_task,
-                file_meta=file_meta,
-                idx=idx,
-              )
+          futures.extend(
+            to_thread(
+              self._transfer_file_main_to_main,
+              send_path=waiting_path,
+              recv_path=(self.destination_ftp_folder / waiting_path.name),
+              move_files_task=files_move_task,
+              file_meta=file_meta,
+              idx=idx,
             )
-
+            for idx, waiting_path in enumerate(file_meta.file_loc)
+          )
         await gather(*futures)
 
-        for key, file_meta in tuple(self.file_application_queue.items()):
-          if all(file_meta.application_success.values()):
-            for local_path in file_meta.file_loc:
-              local_path.unlink()
+      for key, file_meta in tuple(self.file_application_queue.items()):
+        if all(file_meta.application_success.values()):
+          self.file_application_queue.pop(key)
+          schedule = self.cache.schedule if file_meta.current_week else self.cache.prev_week_schedule
 
-            self.file_application_queue.pop(key)
-            schedule = self.cache.schedule if file_meta.current_week else self.cache.prev_week_schedule
+          logger.info(f"{self.__class__.__name__}: Checking off {self.supplier_name}_{file_meta.storenum} invoice_applied")
+          await schedule.check_box((self.supplier_name, file_meta.storenum), DatabaseScheduleColumns.invoice_applied)
 
-            logger.info(f"Checking off {self.supplier_name}_{file_meta.storenum} invoice_applied")
-            await schedule.check_box((self.supplier_name, file_meta.storenum), DatabaseScheduleColumns.invoice_applied)
+  def _transfer_file_vend_to_main(
+    self, send_path: PurePosixPath, recv_path: PurePosixPath, move_files_task: CustomTaskID, file_meta: FileRegisterData, idx: int
+  ):
+    with self.vendor_ftp(self.pickup_ftp_creds) as origin_client:  # type: ignore
+      file_size = origin_client.stat(send_path.as_posix()).st_size
+      with SFTFTPClient(self.sft_ftp_creds) as dest_client:
+        dest_client.voidcmd("TYPE I")
+        with self.pbar.add_task(f"Transferring {send_path.name}") as transfer_task:
+          with origin_client.open(send_path.as_posix(), "rb") as read_file:
+            read_file.prefetch(file_size)
+            with dest_client.transfercmd(f"STOR {recv_path.as_posix()}") as write_file:
+              while buffer := read_file.read(8192):
+                write_file.sendall(buffer)
+                self.pbar.update(transfer_task, advance=len(buffer))
+              if _SSLSocket is not None and isinstance(write_file, _SSLSocket):
+                write_file.unwrap()  # type: ignore
+            dest_client.voidresp()
+        logger.info(
+          f"{self.__class__.__name__}: Transferred SAS [yellow]{send_path}[/] to SFT FTP [yellow]{recv_path}[/]",
+          extra={"markup": True},
+        )
 
-        self.pbar.remove_task(total_downloads_task)
+        success = False
+        with contextlib.suppress(Exception):
+          dest_client.size(recv_path.as_posix())
+          success = True
+        file_meta.pickup_success[idx] = success
+    self.pbar.update(move_files_task, advance=1)
+    return success
+
+  def _transfer_file_main_to_main(
+    self, send_path: PurePosixPath, recv_path: PurePosixPath, move_files_task: CustomTaskID, file_meta: FileRegisterData, idx: int
+  ) -> None:
+    with SFTFTPClient(self.sft_ftp_creds) as origin_client:
+      origin_client.voidcmd("TYPE I")
+      origin_client.rename(send_path.as_posix(), recv_path.as_posix())
+
+      success = False
+      with contextlib.suppress(Exception):
+        origin_client.size(recv_path.as_posix())
+        success = True
+        logger.info(f"{self.__class__.__name__}: Moved [yellow]{send_path}[/] to [yellow]{recv_path}[/]", extra={"markup": True})
+      file_meta.application_success[idx] = success
+
+    self.pbar.update(move_files_task, advance=1)
 
 
 class SFTFTPClient(FTP):

@@ -49,51 +49,14 @@ async def reschedule_all_tasks():
 
     scheduler.add_job(
       processor().save_queue_backups_off_thread,
-      CronTrigger(minute="*/30"),
+      CronTrigger(minute="*/5"),
       id=f"{supplier}_save_queue_backups",
       replace_existing=True,
     )
 
-    # orders = []
-
-    # async with current_week as cache:
-    #   filtered = cache.loc[cache[DatabaseScheduleColumns.supplier] == supplier]
-    #   for _, row in filtered.iterrows():
-    #     order = current_week._model.model_construct(**row)  # type: ignore
-    #     if not order.customer or not order.store and order.customer != "":
-    #       continue
-    #     orders.append((order.store, order.customer, order.invoice_pickup_time, order.invoice_application_time, True))
-    # async with previous_week as cache:
-    #   filtered = cache.loc[cache[DatabaseScheduleColumns.supplier] == supplier]
-    #   for _, row in filtered.iterrows():
-    #     order = previous_week._model.model_construct(**row)  # type: ignore
-    #     if not order.customer or not order.store and order.customer != "":
-    #       continue
-    #     orders.append((order.store, order.customer, order.invoice_pickup_time, order.invoice_application_time, False))
-
-    # scheduler.add_job(
-    #   processor().ensure_pickup,
-    #   CronTrigger(minute="1-59/5"),
-    #   args=[orders],
-    #   id=f"{supplier}_ensure_pickup",
-    #   replace_existing=True,
-    #   next_run_time=datetime.now(TZ) + timedelta(minutes=1),
-    # )
-
-    # scheduler.add_job(
-    #   processor().ensure_application,
-    #   CronTrigger(minute="3-59/5"),
-    #   args=[orders],
-    #   id=f"{supplier}_ensure_application",
-    #   replace_existing=True,
-    #   next_run_time=datetime.now(TZ) + timedelta(minutes=2),
-    # )
-
   now = datetime.now(TZ)
 
   async for order in current_week.walk_typed_rows():
-    if order.store == 33:
-      pass
     if not order.customer or not order.store:
       continue
     if (now - order.invoice_pickup_time) > timedelta(minutes=1) and not order.invoice_grabbed:
@@ -187,7 +150,7 @@ async def flip_week():
   scheduler.resume()
 
 
-async def main():
+async def main():  # sourcery skip: remove-empty-nested-block
   with LiveCustom(refresh_per_second=10, console=RICH_CONSOLE) as live:
     cache = DatabaseCache()
 
@@ -239,34 +202,33 @@ async def main():
       pass
       # await flip_week()
 
-      # order = await cache.schedule.read_typed_row((SuppliersEnum.SAS, 1))
+      # async for order in cache.schedule.walk_typed_rows():
+      #   if not order.customer or not order.store:
+      #     continue
 
-      # pass
-      # await supplier_register[order.supplier]().register_pickup(
-      #   storenum=order.store,
-      #   customer_id=order.customer,
-      #   pickup_date=order.invoice_pickup_time,
-      #   dropoff_date=order.invoice_application_time,
-      #   current_week=True,
-      # )
-      # pass
+      #   await supplier_register[order.supplier]().register_pickup(
+      #     storenum=order.store,
+      #     customer_id=order.customer,
+      #     pickup_date=order.invoice_pickup_time,
+      #     dropoff_date=order.invoice_application_time,
+      #     current_week=True,
+      #   )
 
-      # await supplier_register[order.supplier]().save_queue_backups_off_thread()
+      # await SASProcessor().pickup_files()
 
-      # await supplier_register[order.supplier]().pickup_files()
+      # async for order in cache.schedule.walk_typed_rows():
+      #   if not order.customer or not order.store:
+      #     continue
 
-      # await supplier_register[order.supplier]().save_queue_backups_off_thread()
+      #   await supplier_register[order.supplier]().register_application(
+      #     storenum=order.store,
+      #     customer_id=order.customer,
+      #     pickup_date=order.invoice_pickup_time,
+      #     dropoff_date=order.invoice_application_time,
+      #     current_week=True,
+      #   )
 
-      # pass
-      # await supplier_register[order.supplier]().register_application(
-      #   storenum=order.store,
-      #   customer_id=order.customer,
-      #   pickup_date=order.invoice_pickup_time,
-      # )
-
-      # await supplier_register[order.supplier]().save_queue_backups_off_thread()
-
-      # await supplier_register[order.supplier]().dropoff_files()
+      # await SASProcessor().dropoff_files()
 
     await Event().wait()
 

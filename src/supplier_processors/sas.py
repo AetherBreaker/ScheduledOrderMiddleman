@@ -1,21 +1,19 @@
 from asyncio import gather, to_thread
 from datetime import datetime
-from ftplib import _SSLSocket  # type: ignore
 from json import loads
 from logging import getLogger
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from re import Pattern, compile
 
 from dateutil.relativedelta import SA, SU, relativedelta
 from dateutil.rrule import DAILY, rrule
-from environment_init_vars import CWD, SAS_FTP_CREDS_FILE
+from environment_init_vars import SAS_FTP_CREDS_FILE
 from paramiko import AutoAddPolicy, SFTPClient, SSHClient
 from typing_custom import CustomerID, StoreNum
 from typing_custom.dataframe_column_names import DatabaseScheduleColumns
 from typing_custom.enums import SuppliersEnum
-from utils import paramiko_pbar_callback
 
-from supplier_processors import FileRegisterData, SFTFTPClient, SupplierProcessorBase
+from supplier_processors import FileRegisterData, SupplierProcessorBase
 
 logger = getLogger(__name__)
 
@@ -47,12 +45,13 @@ class SASSFTPClient:
 
 
 class SASProcessor(SupplierProcessorBase):
+  vendor_ftp = SASSFTPClient
   pickup_ftp_creds: dict = loads(SAS_FTP_CREDS_FILE.read_text())
 
   pickup_ftp_folder: PurePosixPath = PurePosixPath("/Fastrax Invoices")
   # pickup_ftp_folder: PurePosixPath = PurePosixPath("/Fastrax Invoices/Archive")
   pickup_archive_ftp_folder: PurePosixPath = PurePosixPath("/Fastrax Invoices/Archive")
-  waiting_folder = CWD / "SAS Waiting Invoices"
+  waiting_folder = PurePosixPath("/Waiting/SAS")
   destination_ftp_folder = PurePosixPath("/SAS")
 
   queue_backup_prefix: str = "sas"
@@ -70,10 +69,14 @@ class SASProcessor(SupplierProcessorBase):
     )
 
     if picked_up:
-      logger.warning(f"Attempted to register pickup for already grabbed invoice: {self.supplier_name}, {storenum}, {customer_id}")
+      logger.warning(
+        f"{self.__class__.__name__}: Attempted to register pickup for already grabbed invoice: {self.supplier_name}, {storenum}, {customer_id}"
+      )
       return
     if applied:
-      logger.warning(f"Attempted to register pickup for already applied invoice: {self.supplier_name}, {storenum}, {customer_id}")
+      logger.warning(
+        f"{self.__class__.__name__}: Attempted to register pickup for already applied invoice: {self.supplier_name}, {storenum}, {customer_id}"
+      )
       return
 
     pattern = self.assemble_filename_pattern(customer_id, pickup_date, dropoff_date, current_week)
@@ -89,6 +92,7 @@ class SASProcessor(SupplierProcessorBase):
     )
 
     self.file_pickup_queue[self.assemble_queue_key(storenum, customer_id, pickup_date)] = register_data
+    logger.info(f"{self.__class__.__name__}: Added {storenum} to pickup queue")
 
   async def register_application(
     self, storenum: StoreNum, customer_id: CustomerID, pickup_date: datetime, dropoff_date: datetime, current_week: bool
@@ -103,12 +107,12 @@ class SASProcessor(SupplierProcessorBase):
     )
     if not picked_up:
       logger.warning(
-        f"Attempted to register application for not-yet picked up invoice: {self.supplier_name}, {storenum}, {customer_id}"
+        f"{self.__class__.__name__}: Attempted to register application for not-yet picked up invoice: {self.supplier_name}, {storenum}, {customer_id}"
       )
       return
     if applied:
       logger.warning(
-        f"Attempted to register application for already applied invoice: {self.supplier_name}, {storenum}, {customer_id}"
+        f"{self.__class__.__name__}: Attempted to register application for already applied invoice: {self.supplier_name}, {storenum}, {customer_id}"
       )
       return
 
@@ -118,147 +122,15 @@ class SASProcessor(SupplierProcessorBase):
         matched_item = self.file_waiting_queue.pop(key)
       except KeyError:
         logger.error(
-          f"No waiting file found for: {self.supplier_name}, {storenum}, {customer_id}, {pickup_date.isoformat()}\n"
+          f"{self.__class__.__name__}: No waiting file found for: {self.supplier_name}, {storenum}, {customer_id}, {pickup_date.isoformat()}\n"
           f"Invoice may not have been picked up or is missing!"
         )
         return
 
       self.file_application_queue[key] = matched_item
+      logger.info(f"{self.__class__.__name__}: Moved {matched_item.storenum} from waiting to application queue")
     else:
-      logger.warning(f"File already registered for application: {key}")
-
-  # async def ensure_pickup(self, entries: Iterable[tuple[StoreNum, CustomerID, datetime, datetime, bool]]) -> None:
-  #   now = datetime.now(tz=TZ)
-  #   for storenum, customer_id, pickup_date, dropoff_date, current_week in entries:
-  #     picked_up = await (self.cache.schedule if current_week else self.cache.prev_week_schedule).check_toggled(
-  #       (self.supplier_name, storenum), DatabaseScheduleColumns.invoice_grabbed
-  #     )
-  #     if not picked_up and ((now - pickup_date) > timedelta(minutes=1)):
-  #       expected_key = self.assemble_queue_key(storenum, customer_id, pickup_date)
-
-  #       pickup = self.file_pickup_queue.get(expected_key)
-  #       waiting = self.file_waiting_queue.get(expected_key)
-
-  #       waiting_for_pickup = pickup is not None
-  #       waiting_to_apply = waiting is not None
-
-  #       if not waiting_for_pickup and not waiting_to_apply:
-  #         logger.warning(f"File missing from both queues, registering for pickup: {expected_key}")
-  #         await self.register_pickup(
-  #           storenum=storenum,
-  #           customer_id=customer_id,
-  #           pickup_date=pickup_date,
-  #           dropoff_date=dropoff_date,
-  #           current_week=current_week,
-  #         )
-  #       # elif waiting_to_apply:
-  #       #   try:
-  #       #     futs = []
-  #       #     for idx, missing_file in filter(lambda item: not item[1].exists(), enumerate(waiting.file_loc)):
-  #       #       logger.warning(f"File missing on disk, attempting re-retrieval: {missing_file}")
-  #       #       futs.append(
-  #       #         to_thread(
-  #       #           self._pickup_file,
-  #       #           remote_path=self.pickup_ftp_folder / missing_file.name,
-  #       #           local_path=missing_file,
-  #       #           file_meta=waiting,
-  #       #           idx=idx,
-  #       #         )
-  #       #       )
-  #       #     if futs:
-  #       #       await gather(*futs)
-  #       #   except FileNotFoundError:
-  #       #     logger.error(f"File not found on FTP: {waiting.file_loc}")
-  #       #   if not all(file.exists() for file in waiting.file_loc):
-  #       #     logger.error(
-  #       #       f"One or more files still missing after re-retrieval: {waiting.file_loc}" f"\nAttempting to retrieve from archive."
-  #       #     )
-  #       #     try:
-  #       #       futs = []
-  #       #       for idx, missing_file in filter(lambda item: not item[1].exists(), enumerate(waiting.file_loc)):
-  #       #         # TODO check archive file date first
-  #       #         futs.append(
-  #       #           to_thread(
-  #       #             self._pickup_file,
-  #       #             remote_path=self.pickup_archive_ftp_folder / missing_file.name,
-  #       #             local_path=missing_file,
-  #       #             file_meta=waiting,
-  #       #             idx=idx,
-  #       #           )
-  #       #         )
-  #       #       if futs:
-  #       #         await gather(*futs)
-  #       #     except FileNotFoundError:
-  #       #       logger.error(f"File not found in archive either: {waiting.file_loc}")
-  #       #     if not all(file.exists() for file in waiting.file_loc):
-  #       #       logger.error(
-  #       #         f"[red]One or more files still missing after archive retrieval: {waiting.file_loc}[/]", extra={"markup": True}
-  #       #       )
-  #       elif waiting_for_pickup:
-  #         logger.warning(f"File(s) still waiting for pickup: {expected_key}")
-
-  # async def ensure_application(self, entries: Iterable[tuple[StoreNum, CustomerID, datetime, datetime, bool]]) -> None:
-  #   now = datetime.now(tz=TZ)
-  #   for storenum, customer_id, pickup_date, dropoff_date, current_week in entries:
-  #     applied = await (self.cache.schedule if current_week else self.cache.prev_week_schedule).check_toggled(
-  #       (self.supplier_name, storenum), DatabaseScheduleColumns.invoice_applied
-  #     )
-  #     if not applied and (dropoff_date < now < (dropoff_date + timedelta(days=1))):
-  #       expected_key = self.assemble_queue_key(storenum, customer_id, pickup_date)
-
-  #       waiting = self.file_waiting_queue.get(expected_key)
-  #       apply = self.file_application_queue.get(expected_key)
-
-  #       waiting_for_application = apply is not None
-  #       waiting_to_move = waiting is not None
-
-  #       if not waiting_for_application and waiting_to_move:
-  #         logger.warning(f"File still waiting to move, registering for application: {expected_key}")
-  #         await self.register_application(
-  #           storenum=storenum,
-  #           customer_id=customer_id,
-  #           pickup_date=pickup_date,
-  #           dropoff_date=dropoff_date,
-  #           current_week=current_week,
-  #         )
-  #       # elif waiting_for_application:
-  #       #   futs = []
-  #       #   for idx, missing_file in filter(lambda item: not item[1].exists(), enumerate(apply.file_loc)):
-  #       #     logger.warning(f"File missing on disk, attempting re-retrieval: {missing_file}")
-  #       #     futs.append(
-  #       #       to_thread(
-  #       #         self._pickup_file,
-  #       #         remote_path=self.pickup_ftp_folder / missing_file.name,
-  #       #         local_path=missing_file,
-  #       #         file_meta=apply,
-  #       #         idx=idx,
-  #       #       )
-  #       #     )
-  #       #   if futs:
-  #       #     await gather(*futs)
-  #       #   if not all(file.exists() for file in apply.file_loc):
-  #       #     logger.error(
-  #       #       f"One or more files still missing after re-retrieval: {apply.file_loc}" f"\nAttempting to retrieve from archive."
-  #       #     )
-  #       #     futs = []
-  #       #     for idx, missing_file in filter(lambda item: not item[1].exists(), enumerate(apply.file_loc)):
-  #       #       futs.append(
-  #       #         to_thread(
-  #       #           self._pickup_file,
-  #       #           remote_path=self.pickup_archive_ftp_folder / missing_file.name,
-  #       #           local_path=missing_file,
-  #       #           file_meta=apply,
-  #       #           idx=idx,
-  #       #         )
-  #       #       )
-  #       #     if futs:
-  #       #       await gather(*futs)
-  #       #     if not all(file.exists() for file in apply.file_loc):
-  #       #       logger.error(
-  #       #         f"[red]One or more files still missing after archive retrieval: {apply.file_loc}[/]", extra={"markup": True}
-  #       #       )
-  #       elif waiting_for_application:
-  #         logger.warning(f"File(s) still waiting for application: {expected_key}")
+      logger.warning(f"{self.__class__.__name__}: File already registered for application: {key}")
 
   def assemble_queue_key(self, storenum: StoreNum, customer_id: CustomerID, pickup_date: datetime) -> str:
     return f"{storenum}-{customer_id}-{pickup_date.isoformat()}"
@@ -276,9 +148,9 @@ class SASProcessor(SupplierProcessorBase):
       )
     )
 
-    years = set(str(date.year) for date in dates)
-    months = set(f"{date.month:02d}" for date in dates)
-    days = set(f"{date.day:02d}" for date in dates)
+    years = {str(date.year) for date in dates}
+    months = {f"{date.month:02d}" for date in dates}
+    days = {f"{date.day:02d}" for date in dates}
 
     years_part = "|".join(years)
     months_part = "|".join(months)
@@ -298,111 +170,105 @@ class SASProcessor(SupplierProcessorBase):
     )
     return compile(pattern)
 
-  # def _transfer_file(self, send_path: PurePosixPath, recv_path: PurePosixPath, file_meta: FileRegisterData, idx: int) -> None:
-  #   with SASSFTPClient(self.pickup_ftp_creds) as origin_client:
-  #     file_size = origin_client.stat(send_path.as_posix()).st_size
-  #     with SFTFTPClient(self.destination_ftp_creds) as dest_client:
-  #       with self.pbar.add_task(f"Transferring {send_path.name}") as transfer_task:
-  #         with origin_client.open(send_path.as_posix(), "rb") as read_file:
-  #           read_file.prefetch(file_size)
-  #           with dest_client.transfercmd(f"STOR {recv_path.as_posix()}") as write_file:
-  #             while buffer := read_file.read(8192):
-  #               write_file.sendall(buffer)
-  #               self.pbar.update(transfer_task, advance=len(buffer))
-  #             if _SSLSocket is not None and isinstance(write_file, _SSLSocket):
-  #               write_file.unwrap()  # type: ignore
-  #           dest_client.voidresp()
-  #       logger.info(f"Transferred SAS {send_path} to SFT FTP {recv_path}")
-
-  #       success = False
-  #       try:
-  #         dest_client.size(recv_path.as_posix())
-  #         success = True
-  #       except Exception:
-  #         pass
-  #       file_meta.pickup_success[idx] = success
-
-  def _pickup_file(self, remote_path: PurePosixPath, local_path: Path, file_meta: FileRegisterData, idx: int) -> None:
-    with SASSFTPClient(self.pickup_ftp_creds) as sftp_client:
-      with self.pbar.add_task(f"Downloading {remote_path}") as download_task:
-        sftp_client.get(
-          remote_path.as_posix(),
-          local_path.as_posix(),
-          callback=paramiko_pbar_callback(self.pbar, download_task),
-        )
-    logger.info(f"Downloaded {remote_path} to {local_path}")
-
-    file_meta.pickup_success[idx] = local_path.exists()
-
   def _archive_file(self, remote_file: str) -> None:
     archive_loc = (self.pickup_archive_ftp_folder / remote_file).as_posix()
     with SASSFTPClient(self.pickup_ftp_creds) as sftp_client:
       try:
         sftp_client.stat(archive_loc)
-        logger.warning("Archive file already exists. Deleting new file instead of moving.")
+        logger.warning(
+          f"{self.__class__.__name__}: Archive file already exists at [yellow]{archive_loc}[/]\nDeleting new file instead of moving."
+        )
 
       except IOError:
         sftp_client.rename((self.pickup_ftp_folder / remote_file).as_posix(), archive_loc)
-        logger.info(f"Archived {remote_file} to {self.pickup_archive_ftp_folder.as_posix()}")
+        logger.info(
+          f"{self.__class__.__name__}: Archived [yellow]{remote_file}[/] to {self.pickup_archive_ftp_folder.as_posix()}",
+          extra={"markup": True},
+        )
         return
 
       sftp_client.remove((self.pickup_ftp_folder / remote_file).as_posix())
     pass
 
   async def pickup_files(self) -> None:
-    if self.file_pickup_queue:
-      async with self.lock:
-        with SASSFTPClient(self.pickup_ftp_creds) as sftp_client:
-          remote_files = [file_attr.filename for file_attr in sftp_client.listdir_attr(self.pickup_ftp_folder.as_posix())]
+    if not self.file_pickup_queue:
+      return
+    async with self.lock:
+      with SASSFTPClient(self.pickup_ftp_creds) as sftp_client:
+        remote_files = [file_attr.filename for file_attr in sftp_client.listdir_attr(self.pickup_ftp_folder.as_posix())]
 
-        items_to_dl: dict[str, FileRegisterData] = {}
-        for key, file_meta in self.file_pickup_queue.items():
-          matched_files = []
+      items_to_dl: dict[str, FileRegisterData] = {}
+      for key, file_meta in self.file_pickup_queue.items():
+        matched_files = []
 
-          for remote_file in remote_files:
-            if match := file_meta.file_pattern.match(remote_file):
-              matched_files.append(match)
+        for remote_file in remote_files:
+          if match := file_meta.file_pattern.match(remote_file):
+            matched_files.append(match)
 
-          if matched_files:
-            file_meta.file_name = []
-            for m in matched_files:
-              file_meta.file_name.append(m.string)
+        if matched_files:
+          file_meta.file_name = [m.string for m in matched_files]
+          items_to_dl[key] = file_meta
+          logger.info(f"{self.__class__.__name__}: Matched {len(matched_files)} files for: {file_meta.storenum}")
+        else:
+          logger.warning(f"{self.__class__.__name__}: No files matched for: {key} with pattern {file_meta.file_pattern.pattern}")
 
-            items_to_dl[key] = file_meta
-          else:
-            logger.warning(f"No files matched for: {key} with pattern {file_meta.file_pattern.pattern}")
-            continue
-
+      with self.pbar.add_task("Transferring Files", total=sum(len(v.file_name) for v in items_to_dl.values())) as move_files_task:
         dl_futures = []
-        for key, file_meta in items_to_dl.items():
-          for idx, (filename, local_path) in enumerate(zip(file_meta.file_name, file_meta.file_loc)):
-            dl_futures.append(
-              to_thread(
-                self._pickup_file,
-                remote_path=(self.pickup_ftp_folder / filename),
-                local_path=local_path,
-                file_meta=file_meta,
-                idx=idx,
-              )
+        for file_meta in items_to_dl.values():
+          dl_futures.extend(
+            to_thread(
+              self._transfer_file_vend_to_main,
+              send_path=(self.pickup_ftp_folder / filename),
+              recv_path=local_path,
+              move_files_task=move_files_task,
+              file_meta=file_meta,
+              idx=idx,
             )
-
+            for idx, (filename, local_path) in enumerate(zip(file_meta.file_name, file_meta.file_loc))
+          )
         await gather(*dl_futures)
 
-        archive_futures = []
-        items_to_advance = {}
-        for key, file_meta in items_to_dl.items():
-          if all(file_meta.pickup_success.values()):
-            for filename in file_meta.file_name:
-              archive_futures.append(to_thread(self._archive_file, filename))
+      archive_futures = []
+      items_to_advance: dict[str, FileRegisterData] = {}
+      for key, file_meta in items_to_dl.items():
+        if all(file_meta.pickup_success.values()):
+          archive_futures.extend(to_thread(self._archive_file, filename) for filename in file_meta.file_name)
+          items_to_advance[key] = file_meta
+          schedule = self.cache.schedule if file_meta.current_week else self.cache.prev_week_schedule
 
-            items_to_advance[key] = file_meta
-            schedule = self.cache.schedule if file_meta.current_week else self.cache.prev_week_schedule
+          logger.info(f"{self.__class__.__name__}: Checking off {self.supplier_name}_{file_meta.storenum} invoice_grabbed")
+          await schedule.check_box((self.supplier_name, file_meta.storenum), DatabaseScheduleColumns.invoice_grabbed)
 
-            logger.info(f"Checking off {self.supplier_name}_{file_meta.storenum} invoice_grabbed")
-            await schedule.check_box((self.supplier_name, file_meta.storenum), DatabaseScheduleColumns.invoice_grabbed)
+      await gather(*archive_futures)
 
-        await gather(*archive_futures)
+    for key, item in items_to_advance.items():
+      self.file_waiting_queue[key] = item
+      self.file_pickup_queue.pop(key)
+      logger.info(f"{self.__class__.__name__}: Moved {item.storenum} to waiting queue")
 
-      for key, item in items_to_advance.items():
-        self.file_waiting_queue[key] = item
-        self.file_pickup_queue.pop(key)
+
+# async def main():
+#   with LiveCustom(refresh_per_second=10, console=RICH_CONSOLE) as live:
+#     file = PurePosixPath("/Fastrax Invoices/Archive/EF45254_20250722040106566837.TXT")
+#     with live.pbar.add_task("Test Transfer", total=1) as task:
+#       SASProcessor(live.pbar)._transfer_file_vend_to_main(
+#         send_path=file,
+#         recv_path=SASProcessor.waiting_folder / file.name,
+#         move_files_task=task,
+#         file_meta=FileRegisterData(
+#           storenum=123,
+#           customer_id="45254",
+#           pickup_date=datetime.now(),
+#           dropoff_date=datetime.now(),
+#           file_pattern=compile(r".*"),
+#           current_week=True,
+#           file_name=[file.name],
+#           _waiting_folder=PurePosixPath("/Waiting/SAS"),
+#         ),
+#         idx=0,
+#       )
+#       pass
+
+
+# if __name__ == "__main__":
+#   run(main())

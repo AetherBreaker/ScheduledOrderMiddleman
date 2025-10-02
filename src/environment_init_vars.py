@@ -20,7 +20,7 @@ SETTINGS = Settings()  # type: ignore
 # Folder paths
 CWD = Path.cwd()
 
-SPEC_CWD = Path.cwd() if not getattr(sys, "frozen", False) else Path(__file__).parent
+SPEC_CWD = Path(__file__).parent if getattr(sys, "frozen", False) else Path.cwd()
 
 GOOGLE_API_KEY_FILE = SPEC_CWD / "db-key.json"
 
