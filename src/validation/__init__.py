@@ -88,11 +88,10 @@ class CustomBaseModel(BaseModel):
     try:
       results = handler(data)
     except ValidationError as e:
-      if cls.__name__ == "ScheduledOrderDBEntryModel":
-        for err in e.errors():
-          if err["type"] != "missing":
-            raise e
-      else:
+      if cls.__name__ != "ScheduledOrderDBEntryModel":
         raise e
 
+      for err in e.errors():
+        if err["type"] != "missing":
+          raise e
     return results  # type: ignore

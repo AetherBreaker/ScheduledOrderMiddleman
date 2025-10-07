@@ -45,28 +45,26 @@ TIMESTAMP_PATTERN = compile(r"(?P<Weekday>\w*?) (?P<Hour>\d{1,2}):(?P<Minute>\d{
 def process_time_pattern(target_time) -> datetime:
   match = TIMESTAMP_PATTERN.match(target_time) if target_time else None
 
-  if match:
-    now = today(tzinfo=TZ)
-
-    next_sunday = now + relativedelta(weekday=SU)
-
-    now.weekday()
-
-    weekday = weekday_lookup.get(match.group("Weekday"))
-    if not weekday:
-      raise ValueError(f"Invalid weekday: {match.group('Weekday')}")
-
-    hour = int(match.group("Hour")) + (12 if match.group("Period") == "PM" and match.group("Hour") != "12" else 0)
-    minute = int(match.group("Minute"))
-
-    result = now + relativedelta(weekday=weekday(+1), hour=hour, minute=minute)
-    if result >= next_sunday:
-      result -= relativedelta(weeks=1)
-
-    return result
-
-  else:
+  if not match:
     return target_time  # type: ignore
+  now = today(tzinfo=TZ)
+
+  next_sunday = now + relativedelta(weekday=SU)
+
+  now.weekday()
+
+  weekday = weekday_lookup.get(match.group("Weekday"))
+  if not weekday:
+    raise ValueError(f"Invalid weekday: {match.group('Weekday')}")
+
+  hour = int(match.group("Hour")) + (12 if match.group("Period") == "PM" and match.group("Hour") != "12" else 0)
+  minute = int(match.group("Minute"))
+
+  result = now + relativedelta(weekday=weekday(+1), hour=hour, minute=minute)
+  if result >= next_sunday:
+    result -= relativedelta(weeks=1)
+
+  return result
 
 
 class ScheduledOrderDBEntryModel(CustomBaseModel):
