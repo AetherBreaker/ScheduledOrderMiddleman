@@ -1,4 +1,5 @@
 $env:PYTHONOPTIMIZE = 2
+$env:PYTHONPYCACHEPREFIX = ".\PYCACHE"
 pyinstaller.exe `
   -y `
   --clean `
@@ -12,3 +13,4 @@ pyinstaller.exe `
   -i "sft.ico" `
   "src\__main__.py"
 Remove-Item Env:PYTHONOPTIMIZE
+Remove-Item Env:PYTHONPYCACHEPREFIX
