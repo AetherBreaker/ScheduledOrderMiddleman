@@ -1,18 +1,19 @@
 import contextlib
 from asyncio import gather, to_thread
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from ftplib import FTP, _SSLSocket  # type: ignore
-from json import dump, loads
+from json import loads
 from logging import getLogger
 from pathlib import Path, PurePosixPath
-from re import Pattern, compile
+from re import Pattern
 from typing import Self
 
 from aiologic import Lock
 from database.cache import DatabaseCache
 from environment_init_vars import CWD, SFT_WEBSITE_CREDS_FILE
+from pydantic import ConfigDict, Field, TypeAdapter
+from pydantic.dataclasses import dataclass
 from rich_custom import CustomTaskID, ProgressCustom
 from typing_custom import CustomerID, StoreNum
 from typing_custom.abc import SingletonType
@@ -31,6 +32,14 @@ def advance_pbar(pbar: ProgressCustom, task_id: CustomTaskID):
 
 @dataclass
 class FileRegisterData:
+  __pydantic_config__ = ConfigDict(
+    populate_by_name=True,
+    use_enum_values=True,
+    validate_default=True,
+    validate_assignment=True,
+    coerce_numbers_to_str=True,
+  )
+
   storenum: StoreNum
   customer_id: CustomerID
   pickup_date: datetime
@@ -39,9 +48,9 @@ class FileRegisterData:
   current_week: bool
   _waiting_folder: PurePosixPath
 
-  file_name: list[str] = field(default_factory=list)
-  pickup_success: dict[int, bool] = field(default_factory=dict)
-  application_success: dict[int, bool] = field(default_factory=dict)
+  file_name: list[str] = Field(default_factory=list)
+  pickup_success: dict[int, bool] = Field(default_factory=dict)
+  application_success: dict[int, bool] = Field(default_factory=dict)
 
   @property
   def file_loc(self) -> list[PurePosixPath]:
@@ -54,6 +63,8 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
   file_pickup_queue: dict[str, FileRegisterData] = {}
   file_waiting_queue: dict[str, FileRegisterData] = {}
   file_application_queue: dict[str, FileRegisterData] = {}
+
+  queue_ta = TypeAdapter(dict[str, FileRegisterData])
 
   file_queue_backup_folder: Path = CWD / "queue backups"
 
@@ -91,60 +102,69 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
       backup = (
         (
           self.pickup_queue_backup_file,
-          {
-            k: {ik: (iv.pattern if isinstance(iv, Pattern) else str(iv)) for ik, iv in asdict(v).items()}
-            for k, v in deepcopy(self.file_pickup_queue).items()
-          },
+          self.queue_ta.dump_json(self.file_pickup_queue, indent=2, round_trip=True),
         ),
         (
           self.waiting_queue_backup_file,
-          {
-            k: {ik: (iv.pattern if isinstance(iv, Pattern) else str(iv)) for ik, iv in asdict(v).items()}
-            for k, v in deepcopy(self.file_waiting_queue).items()
-          },
+          self.queue_ta.dump_json(self.file_waiting_queue, indent=2, round_trip=True),
         ),
         (
           self.application_queue_backup_file,
-          {
-            k: {ik: (iv.pattern if isinstance(iv, Pattern) else str(iv)) for ik, iv in asdict(v).items()}
-            for k, v in deepcopy(self.file_application_queue).items()
-          },
+          self.queue_ta.dump_json(self.file_application_queue, indent=2, round_trip=True),
         ),
       )
+      pass
+
+      # for _, bak in backup:
+      #   for k, v in bak.items():
+      #     v["file_pattern"] = v["file_pattern"].pattern
+      #     v["_waiting_folder"] = str(v["_waiting_folder"])
+      #     v["pickup_date"] = v["pickup_date"].isoformat()
+      #     v["dropoff_date"] = v["dropoff_date"].isoformat()
 
       for file, data in backup:
-        with file.open("w", encoding="utf-8") as f:
-          dump(data, f, indent=2)
+        with file.open("wb") as f:
+          f.write(data)
 
   def _load_queue_backups(self) -> None:
     with self.lock:
       to_load = (
         (
-          loads(self.pickup_queue_backup_file.read_text() if self.pickup_queue_backup_file.exists() else "{}"),
+          self.queue_ta.validate_json(
+            self.pickup_queue_backup_file.read_text() if self.pickup_queue_backup_file.exists() else "{}"
+          ),
           self.file_pickup_queue,
         ),
         (
-          loads(self.waiting_queue_backup_file.read_text() if self.waiting_queue_backup_file.exists() else "{}"),
+          self.queue_ta.validate_json(
+            self.waiting_queue_backup_file.read_text() if self.waiting_queue_backup_file.exists() else "{}"
+          ),
           self.file_waiting_queue,
         ),
         (
-          loads(self.application_queue_backup_file.read_text() if self.application_queue_backup_file.exists() else "{}"),
+          self.queue_ta.validate_json(
+            self.application_queue_backup_file.read_text() if self.application_queue_backup_file.exists() else "{}"
+          ),
           self.file_application_queue,
         ),
       )
 
       for loaded, target in to_load:
-        for k, v in loaded.items():
-          target[k] = FileRegisterData(
-            storenum=v["storenum"],
-            customer_id=v["customer_id"],
-            pickup_date=datetime.fromisoformat(v["pickup_date"]),
-            dropoff_date=datetime.fromisoformat(v["dropoff_date"]),
-            file_pattern=compile(v["file_pattern"]),
-            current_week=v["current_week"],
-            file_name=v.get("file_name", []),
-            _waiting_folder=self.waiting_folder,
-          )
+        target.clear()
+        target.update(deepcopy(loaded))
+        # for k, v in loaded.items():
+        # target[k] = FileRegisterData(
+        #   storenum=v["storenum"],
+        #   customer_id=v["customer_id"],
+        #   pickup_date=datetime.fromisoformat(v["pickup_date"]),
+        #   dropoff_date=datetime.fromisoformat(v["dropoff_date"]),
+        #   file_pattern=compile(v["file_pattern"]),
+        #   current_week=v["current_week"],
+        #   _waiting_folder=self.waiting_folder,
+        #   file_name=v.get("file_name", []),
+        #   pickup_success=v.get("pickup_success", {}),
+        #   application_success=v.get("application_success", {}),
+        # )
 
   async def register_pickup(
     self, storenum: StoreNum, customer_id: CustomerID, pickup_date: datetime, dropoff_date: datetime, current_week: bool = True

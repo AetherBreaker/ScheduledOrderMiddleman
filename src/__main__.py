@@ -211,17 +211,24 @@ async def main():  # sourcery skip: remove-empty-nested-block
       pass
       # await flip_week()
 
+      # now = datetime.now(TZ)
+
       # async for order in cache.schedule.walk_typed_rows():
       #   if not order.customer or not order.store:
       #     continue
 
-      #   await supplier_register[order.supplier]().register_pickup(
-      #     storenum=order.store,
-      #     customer_id=order.customer,
-      #     pickup_date=order.invoice_pickup_time,
-      #     dropoff_date=order.invoice_application_time,
-      #     current_week=True,
-      #   )
+      #   if order.invoice_pickup_time <= now:
+      #     await supplier_register[order.supplier]().register_pickup(
+      #       storenum=order.store,
+      #       customer_id=order.customer,
+      #       pickup_date=order.invoice_pickup_time,
+      #       dropoff_date=order.invoice_application_time,
+      #       current_week=True,
+      #     )
+
+      # SASProcessor()._save_backups()
+
+      # SASProcessor()._load_queue_backups()
 
       # await SASProcessor().pickup_files()
 
