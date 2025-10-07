@@ -76,6 +76,7 @@ async def reschedule_all_tasks():
         },
         id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
         replace_existing=True,
+        jobstore="order_processing",
       )
 
     if (now - order.invoice_application_time) > timedelta(minutes=1) and not order.invoice_applied:
@@ -97,6 +98,7 @@ async def reschedule_all_tasks():
         },
         id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
         replace_existing=True,
+        jobstore="order_processing",
       )
 
   async for order in previous_week.walk_typed_rows():
@@ -117,6 +119,7 @@ async def reschedule_all_tasks():
         },
         id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
         replace_existing=True,
+        jobstore="order_processing",
       )
 
     if (now - order.invoice_application_time) > timedelta(minutes=1) and not order.invoice_applied:
@@ -136,16 +139,21 @@ async def reschedule_all_tasks():
         },
         id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
         replace_existing=True,
+        jobstore="order_processing",
       )
+
+  scheduler.print_jobs()
 
 
 async def flip_week():
   scheduler.pause()
-  scheduler.remove_all_jobs()
+  scheduler.remove_all_jobs("order_processing")
   cache = DatabaseCache()
   await cache.flip_to_new_week()
 
   await reschedule_all_tasks()
+
+  scheduler.print_jobs()
 
   scheduler.resume()
 
@@ -158,13 +166,13 @@ async def main():  # sourcery skip: remove-empty-nested-block
       processor(live.pbar)
 
     await cache.refresh_cache()
+    await reschedule_all_tasks()
 
     scheduler.add_job(
       cache.refresh_cache,
       CronTrigger(minute="*/30"),
       id="refresh_cache",
       replace_existing=True,
-      next_run_time=datetime.now(TZ) + timedelta(minutes=30),
     )
 
     scheduler.add_job(
@@ -177,11 +185,10 @@ async def main():  # sourcery skip: remove-empty-nested-block
     scheduler.add_job(
       reschedule_all_tasks,
       CronTrigger(
-        hour=7,
+        hour=5,
       ),
       id="reschedule_all_tasks",
       replace_existing=True,
-      next_run_time=datetime.now(TZ) + timedelta(seconds=10),
     )
 
     scheduler.add_job(
@@ -197,6 +204,8 @@ async def main():  # sourcery skip: remove-empty-nested-block
     )
 
     scheduler.start()
+
+    scheduler.print_jobs()
 
     if __debug__:
       pass

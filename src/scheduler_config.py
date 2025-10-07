@@ -137,6 +137,7 @@ class OrderProcessingScheduler(AsyncIOScheduler):
     job_stores = {
       # "default": TestJobStore(engine=engine, tablename="apscheduler_jobs", pickle_protocol=HIGHEST_PROTOCOL),
       "default": MemoryJobStore(),
+      "order_processing": MemoryJobStore(),
     }
 
     job_defaults = {
@@ -158,12 +159,7 @@ class OrderProcessingScheduler(AsyncIOScheduler):
         in the store
 
     """
-    # Fill in undefined values with defaults
-    replacements = {}
-    for key, value in self._job_defaults.items():
-      if not hasattr(job, key):
-        replacements[key] = value
-
+    replacements = {key: value for key, value in self._job_defaults.items() if not hasattr(job, key)}
     # Calculate the next run time if there is none defined
     if not hasattr(job, "next_run_time"):
       now = datetime.now(self.timezone)
