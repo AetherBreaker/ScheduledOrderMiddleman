@@ -7,7 +7,7 @@ from datetime import datetime
 from inspect import get_annotations
 from logging import getLogger
 from re import compile
-from typing import Annotated, Optional
+from typing import Annotated, Optional, TypeAliasType
 
 from dateutil.relativedelta import FR, MO, SA, SU, TH, TU, WE, relativedelta
 from dateutil.utils import today
@@ -89,11 +89,26 @@ class OrderLogDBEntryModel(CustomBaseModel):
   notes: Optional[str] = None
 
 
-SCHEDULE_TYPE_ADAPTERS = {
-  field: TypeAdapter(fieldinf, config=None if issubclass(fieldinf, (CustomBaseModel, CustomRootModel)) else PYDANTIC_CONFIG)
-  for field, fieldinf in get_annotations(ScheduledOrderDBEntryModel).items()
-}
-ORDER_LOG_TYPE_ADAPTERS = {
-  field: TypeAdapter(fieldinf, config=None if issubclass(fieldinf, (CustomBaseModel, CustomRootModel)) else PYDANTIC_CONFIG)
-  for field, fieldinf in get_annotations(OrderLogDBEntryModel).items()
-}
+SCHEDULE_TYPE_ADAPTERS = {}
+for field, fieldinf in get_annotations(ScheduledOrderDBEntryModel).items():
+  try:
+    SCHEDULE_TYPE_ADAPTERS[field] = TypeAdapter(
+      fieldinf,
+      config=None
+      if issubclass(fieldinf.__value__ if type(fieldinf) is TypeAliasType else fieldinf, (CustomBaseModel, CustomRootModel))
+      else PYDANTIC_CONFIG,
+    )
+  except Exception:
+    SCHEDULE_TYPE_ADAPTERS[field] = TypeAdapter(fieldinf, config=PYDANTIC_CONFIG)
+
+ORDER_LOG_TYPE_ADAPTERS = {}
+for field, fieldinf in get_annotations(OrderLogDBEntryModel).items():
+  try:
+    ORDER_LOG_TYPE_ADAPTERS[field] = TypeAdapter(
+      fieldinf,
+      config=None
+      if issubclass(fieldinf.__value__ if type(fieldinf) is TypeAliasType else fieldinf, (CustomBaseModel, CustomRootModel))
+      else PYDANTIC_CONFIG,
+    )
+  except Exception:
+    ORDER_LOG_TYPE_ADAPTERS[field] = TypeAdapter(fieldinf, config=PYDANTIC_CONFIG)
