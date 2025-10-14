@@ -196,6 +196,13 @@ async def main():  # sourcery skip: remove-empty-nested-block
       replace_existing=True,
     )
 
+    scheduler.add_job(
+      scheduler.print_jobs,
+      CronTrigger(minute="*/1"),
+      id="print_jobs",
+      replace_existing=True,
+    )
+
     scheduler.start()
 
     scheduler.print_jobs()
