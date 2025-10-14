@@ -12,7 +12,6 @@ from typing import Any, Literal, Optional, overload
 from aiologic import Lock
 from aiorwlock import RWLock
 from dateutil.relativedelta import SA, relativedelta
-from dateutil.utils import today
 from environment_init_vars import GOOGLE_API_KEY_FILE, SETTINGS
 from google.oauth2.service_account import Credentials
 from gspread import Client, authorize
@@ -29,6 +28,7 @@ from typing_custom.dataframe_column_names import (
   DatabaseScheduleColumns,
   DatabaseScheduleIndex,
 )
+from utils import today
 from validation import CustomBaseModel
 from validation.apply_model import build_typed_dataframe
 from validation.models.db_entries import (

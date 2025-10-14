@@ -3,10 +3,9 @@ if __name__ == "__main__":
 
   configure_logging()
 
-import logging
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from traceback import format_tb
 
 import apscheduler.executors.base as exec_base
@@ -23,6 +22,7 @@ from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.schedulers.base import STATE_RUNNING
 from environment_init_vars import TZ
+from utils import get_now
 
 DO_NOT_LOG_JOBS = ["submit_queued_writes_to_pool"]
 
@@ -39,7 +39,9 @@ def run_job(job, jobstore_alias, run_times, logger_name):
     # See if the job missed its run time window, and handle
     # possible misfires accordingly
     if job.misfire_grace_time is not None:
-      difference = datetime.now(timezone.utc) - run_time
+      now = get_now(timezone.utc)
+
+      difference = now - run_time
       grace_time = timedelta(seconds=job.misfire_grace_time)
       if difference > grace_time:
         events.append(JobExecutionEvent(EVENT_JOB_MISSED, job.id, jobstore_alias, run_time))
@@ -87,7 +89,9 @@ async def run_coroutine_job(job, jobstore_alias, run_times, logger_name):
   for run_time in run_times:
     # See if the job missed its run time window, and handle possible misfires accordingly
     if job.misfire_grace_time is not None:
-      difference = datetime.now(timezone.utc) - run_time
+      now = get_now(timezone.utc)
+
+      difference = now - run_time
       grace_time = timedelta(seconds=job.misfire_grace_time)
       if difference > grace_time:
         events.append(JobExecutionEvent(EVENT_JOB_MISSED, job.id, jobstore_alias, run_time))
@@ -162,7 +166,8 @@ class OrderProcessingScheduler(AsyncIOScheduler):
     replacements = {key: value for key, value in self._job_defaults.items() if not hasattr(job, key)}
     # Calculate the next run time if there is none defined
     if not hasattr(job, "next_run_time"):
-      now = datetime.now(self.timezone)
+      now = get_now(self.timezone)
+
       replacements["next_run_time"] = job.trigger.get_next_fire_time(None, now)
 
     # Apply any replacements

@@ -10,11 +10,11 @@ from re import compile
 from typing import Annotated, Optional, TypeAliasType
 
 from dateutil.relativedelta import FR, MO, SA, SU, TH, TU, WE, relativedelta
-from dateutil.utils import today
 from environment_init_vars import TZ
 from pydantic import BeforeValidator, TypeAdapter
 from typing_custom import CustomerID, InvoiceNum, StoreNum
 from typing_custom.enums import StateEnum, SuppliersEnum, WeekdayEnum
+from utils import today
 
 from validation import PYDANTIC_CONFIG, CustomBaseModel, CustomRootModel
 
