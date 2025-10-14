@@ -6,6 +6,7 @@ if __name__ == "__main__":
 import sys
 import traceback
 from datetime import timedelta, timezone
+from logging import getLogger
 from traceback import format_tb
 
 import apscheduler.executors.base as exec_base
@@ -20,9 +21,12 @@ from apscheduler.events import (
 from apscheduler.jobstores.base import ConflictingIdError
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.schedulers.base import STATE_RUNNING
+from apscheduler.schedulers.base import STATE_RUNNING, STATE_STOPPED
 from environment_init_vars import TZ
 from utils import get_now
+
+logger = getLogger(__name__)
+
 
 DO_NOT_LOG_JOBS = ["submit_queued_writes_to_pool"]
 
@@ -34,7 +38,7 @@ def run_job(job, jobstore_alias, run_times, logger_name):
 
   """
   events = []
-  logger = logging.getLogger(logger_name)
+  local_logger = getLogger(logger_name)
   for run_time in run_times:
     # See if the job missed its run time window, and handle
     # possible misfires accordingly
@@ -45,13 +49,13 @@ def run_job(job, jobstore_alias, run_times, logger_name):
       grace_time = timedelta(seconds=job.misfire_grace_time)
       if difference > grace_time:
         events.append(JobExecutionEvent(EVENT_JOB_MISSED, job.id, jobstore_alias, run_time))
-        logger.warning(f'Run time of job "{job.id}" was missed by {difference}')
+        local_logger.warning(f'Run time of job "{job.id}" was missed by {difference}')
         continue
 
     if job.id not in DO_NOT_LOG_JOBS:
-      logger.info(f'Running job "{job.id}" (scheduled at {run_time})')
+      local_logger.info(f'Running job "{job.id}" (scheduled at {run_time})')
     else:
-      logger.debug(f'Running job "{job.id}" (scheduled at {run_time})')
+      local_logger.debug(f'Running job "{job.id}" (scheduled at {run_time})')
     try:
       retval = job.func(*job.args, **job.kwargs)
     except BaseException:
@@ -67,17 +71,17 @@ def run_job(job, jobstore_alias, run_times, logger_name):
           traceback=formatted_tb,
         )
       )
-      logger.exception(f'Job "{job.id}" raised an exception')
+      local_logger.exception(f'Job "{job.id}" raised an exception')
 
       # This is to prevent cyclic references that would lead to memory leaks
       traceback.clear_frames(tb)
       del tb
     else:
       events.append(JobExecutionEvent(EVENT_JOB_EXECUTED, job.id, jobstore_alias, run_time, retval=retval))
-      # if job.id not in DO_NOT_LOG_JOBS:
-      #   logger.info(f'Job "{job.id}" executed successfully')
-      # else:
-      #   logger.debug(f'Job "{job.id}" executed successfully')
+      if job.id not in DO_NOT_LOG_JOBS:
+        logger.info(f'Job "{job.id}" executed successfully')
+      else:
+        logger.debug(f'Job "{job.id}" executed successfully')
 
   return events
 
@@ -85,7 +89,7 @@ def run_job(job, jobstore_alias, run_times, logger_name):
 async def run_coroutine_job(job, jobstore_alias, run_times, logger_name):
   """Coroutine version of run_job()."""
   events = []
-  logger = logging.getLogger(logger_name)
+  logger = getLogger(logger_name)
   for run_time in run_times:
     # See if the job missed its run time window, and handle possible misfires accordingly
     if job.misfire_grace_time is not None:
@@ -121,10 +125,10 @@ async def run_coroutine_job(job, jobstore_alias, run_times, logger_name):
       traceback.clear_frames(tb)
     else:
       events.append(JobExecutionEvent(EVENT_JOB_EXECUTED, job.id, jobstore_alias, run_time, retval=retval))
-      # if job.id not in DO_NOT_LOG_JOBS:
-      #   logger.info(f'Job "{job.id}" executed successfully')
-      # else:
-      #   logger.debug(f'Job "{job.id}" executed successfully')
+      if job.id not in DO_NOT_LOG_JOBS:
+        logger.info(f'Job "{job.id}" executed successfully')
+      else:
+        logger.debug(f'Job "{job.id}" executed successfully')
 
   return events
 
@@ -195,3 +199,34 @@ class OrderProcessingScheduler(AsyncIOScheduler):
     # Notify the scheduler about the new job
     if self.state == STATE_RUNNING:
       self.wakeup()
+
+  def print_jobs(self, jobstore=None, out=None):
+    """
+    print_jobs(jobstore=None, out=sys.stdout)
+
+    Prints out a textual listing of all jobs currently scheduled on either all job stores or
+    just a specific one.
+
+    :param str|unicode jobstore: alias of the job store, ``None`` to list jobs from all stores
+    :param file out: a file-like object to print to (defaults to  **sys.stdout** if nothing is
+        given)
+
+    """
+    lines = []
+    with self._jobstores_lock:
+      if self.state == STATE_STOPPED:
+        lines.append("Pending jobs:")
+        if self._pending_jobs:
+          lines.extend(f"  {job.id}" for job, jobstore_alias, _ in self._pending_jobs if jobstore in (None, jobstore_alias))
+        else:
+          lines.append("  No pending jobs")
+      else:
+        for alias, store in sorted(self._jobstores.items()):
+          if jobstore in (None, alias):
+            lines.append(f"Jobstore {alias}:")
+            if jobs := store.get_all_jobs():
+              lines.extend(f"  {job.id}" for job in jobs)
+            else:
+              lines.append("  No scheduled jobs")
+
+    logger.info("\n".join(lines))
