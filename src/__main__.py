@@ -187,10 +187,10 @@ async def main():  # sourcery skip: remove-empty-nested-block
     scheduler.add_job(
       flip_week,
       CronTrigger(
-        day_of_week="sat",
-        hour=23,
-        minute=59,
-        second=59,
+        day_of_week="sun",
+        hour=0,
+        minute=0,
+        second=0,
       ),
       id="flip_week",
       replace_existing=True,
