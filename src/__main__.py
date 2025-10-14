@@ -4,13 +4,11 @@ if __name__ == "__main__":
   configure_logging()
 
 from asyncio import Event, run
-from datetime import datetime, timedelta
 from logging import getLogger
 
 from apscheduler.triggers.cron import CronTrigger
 from database.cache import DatabaseCache
 from dateutil.relativedelta import SA, relativedelta
-from environment_init_vars import TZ
 from logging_config import RICH_CONSOLE
 from rich_custom import LiveCustom
 from scheduler_config import OrderProcessingScheduler
@@ -24,6 +22,7 @@ supplier_register = {
   SuppliersEnum.SAS: SASProcessor,
   # SuppliersEnum.RYO: ...,
 }
+
 
 scheduler = OrderProcessingScheduler.init_scheduler()
 
@@ -54,93 +53,87 @@ async def reschedule_all_tasks():
       replace_existing=True,
     )
 
-  now = datetime.now(TZ)
-
   async for order in current_week.walk_typed_rows():
     if not order.customer or not order.store:
       continue
-    if (now - order.invoice_pickup_time) > timedelta(minutes=1) and not order.invoice_grabbed:
-      scheduler.add_job(
-        supplier_register[order.supplier]().register_pickup,
-        CronTrigger(
-          minute="1-59/5",
-          start_date=order.invoice_pickup_time,
-          end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
-        ),
-        kwargs={
-          "storenum": order.store,
-          "customer_id": order.customer,
-          "pickup_date": order.invoice_pickup_time,
-          "dropoff_date": order.invoice_application_time,
-          "current_week": True,
-        },
-        id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
-        replace_existing=True,
-        jobstore="order_processing",
-      )
+    scheduler.add_job(
+      supplier_register[order.supplier]().register_pickup,
+      CronTrigger(
+        minute="1-59/5",
+        start_date=order.invoice_pickup_time,
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+      ),
+      kwargs={
+        "storenum": order.store,
+        "customer_id": order.customer,
+        "pickup_date": order.invoice_pickup_time,
+        "dropoff_date": order.invoice_application_time,
+        "current_week": True,
+      },
+      id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
+      replace_existing=True,
+      jobstore="order_processing",
+    )
 
-    if (now - order.invoice_application_time) > timedelta(minutes=1) and not order.invoice_applied:
-      if not order.customer or not order.store:
-        continue
-      scheduler.add_job(
-        supplier_register[order.supplier]().register_application,
-        CronTrigger(
-          minute="3-59/5",
-          start_date=order.invoice_application_time,
-          end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
-        ),
-        kwargs={
-          "storenum": order.store,
-          "customer_id": order.customer,
-          "pickup_date": order.invoice_pickup_time,
-          "dropoff_date": order.invoice_application_time,
-          "current_week": True,
-        },
-        id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
-        replace_existing=True,
-        jobstore="order_processing",
-      )
+    scheduler.add_job(
+      supplier_register[order.supplier]().register_application,
+      CronTrigger(
+        minute="3-59/5",
+        start_date=order.invoice_application_time,
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+      ),
+      kwargs={
+        "storenum": order.store,
+        "customer_id": order.customer,
+        "pickup_date": order.invoice_pickup_time,
+        "dropoff_date": order.invoice_application_time,
+        "current_week": True,
+      },
+      id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
+      replace_existing=True,
+      jobstore="order_processing",
+    )
 
   async for order in previous_week.walk_typed_rows():
-    if (now - order.invoice_pickup_time) > timedelta(minutes=1) and not order.invoice_grabbed:
-      scheduler.add_job(
-        supplier_register[order.supplier]().register_pickup,
-        CronTrigger(
-          minute="1-59/5",
-          start_date=order.invoice_pickup_time,
-          end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
-        ),
-        kwargs={
-          "storenum": order.store,
-          "customer_id": order.customer,
-          "pickup_date": order.invoice_pickup_time,
-          "dropoff_date": order.invoice_application_time,
-          "current_week": False,
-        },
-        id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
-        replace_existing=True,
-        jobstore="order_processing",
-      )
+    if not order.customer or not order.store:
+      continue
+    scheduler.add_job(
+      supplier_register[order.supplier]().register_pickup,
+      CronTrigger(
+        minute="1-59/5",
+        start_date=order.invoice_pickup_time,
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+      ),
+      kwargs={
+        "storenum": order.store,
+        "customer_id": order.customer,
+        "pickup_date": order.invoice_pickup_time,
+        "dropoff_date": order.invoice_application_time,
+        "current_week": False,
+      },
+      id=f"{order.supplier}_register_pickup_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
+      replace_existing=True,
+      jobstore="order_processing",
+    )
 
-    if (now - order.invoice_application_time) > timedelta(minutes=1) and not order.invoice_applied:
-      scheduler.add_job(
-        supplier_register[order.supplier]().register_application,
-        CronTrigger(
-          minute="3-59/5",
-          start_date=order.invoice_application_time,
-          end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
-        ),
-        kwargs={
-          "storenum": order.store,
-          "customer_id": order.customer,
-          "pickup_date": order.invoice_pickup_time,
-          "dropoff_date": order.invoice_application_time,
-          "current_week": True,
-        },
-        id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
-        replace_existing=True,
-        jobstore="order_processing",
-      )
+    scheduler.add_job(
+      supplier_register[order.supplier]().register_application,
+      CronTrigger(
+        minute="3-59/5",
+        start_date=order.invoice_application_time,
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+      ),
+      kwargs={
+        "storenum": order.store,
+        "customer_id": order.customer,
+        "pickup_date": order.invoice_pickup_time,
+        "dropoff_date": order.invoice_application_time,
+        "current_week": True,
+      },
+      id=f"{order.supplier}_register_dropoff_{order.store:0>3}_{order.customer}_{order.invoice_pickup_time.isoformat()}",
+      replace_existing=True,
+      jobstore="order_processing",
+    )
 
   scheduler.print_jobs()
 
@@ -209,42 +202,20 @@ async def main():  # sourcery skip: remove-empty-nested-block
 
     if __debug__:
       pass
+      # scheduler.print_jobs()
+
+      # global TESTING_THIS_WEEK
+
+      # TESTING_THIS_WEEK.clear()
+      # TESTING_THIS_WEEK.append(True)
+
       # await flip_week()
 
-      # now = datetime.now(TZ)
+      # scheduler.print_jobs()
 
-      # async for order in cache.schedule.walk_typed_rows():
-      #   if not order.customer or not order.store:
-      #     continue
+      # await reschedule_all_tasks()
 
-      #   if order.invoice_pickup_time <= now:
-      #     await supplier_register[order.supplier]().register_pickup(
-      #       storenum=order.store,
-      #       customer_id=order.customer,
-      #       pickup_date=order.invoice_pickup_time,
-      #       dropoff_date=order.invoice_application_time,
-      #       current_week=True,
-      #     )
-
-      # SASProcessor()._save_backups()
-
-      # SASProcessor()._load_queue_backups()
-
-      # await SASProcessor().pickup_files()
-
-      # async for order in cache.schedule.walk_typed_rows():
-      #   if not order.customer or not order.store:
-      #     continue
-
-      #   await supplier_register[order.supplier]().register_application(
-      #     storenum=order.store,
-      #     customer_id=order.customer,
-      #     pickup_date=order.invoice_pickup_time,
-      #     dropoff_date=order.invoice_application_time,
-      #     current_week=True,
-      #   )
-
-      # await SASProcessor().dropoff_files()
+      # scheduler.print_jobs()
 
     await Event().wait()
 
