@@ -51,8 +51,6 @@ def process_time_pattern(target_time) -> datetime:
 
   next_sunday = now + relativedelta(weekday=SU)
 
-  now.weekday()
-
   weekday = weekday_lookup.get(match.group("Weekday"))
   if not weekday:
     raise ValueError(f"Invalid weekday: {match.group('Weekday')}")
