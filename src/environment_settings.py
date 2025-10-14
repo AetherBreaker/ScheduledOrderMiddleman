@@ -17,12 +17,12 @@ logger = getLogger(__name__)
 os.environ.setdefault("PYDANTIC_ERRORS_INCLUDE_URL", "false")
 
 
-CWD = Path.cwd() if not getattr(sys, "frozen", False) else Path(__file__).parent
+CWD = Path(__file__).parent if getattr(sys, "frozen", False) else Path.cwd()
 
 
 class Settings(BaseSettings):
   model_config = SettingsConfigDict(
-    env_file=CWD / ".env",
+    env_file=CWD / ("testing.env" if __debug__ else "production.env"),
     env_file_encoding="utf-8",
     env_ignore_empty=True,
   )
