@@ -61,7 +61,7 @@ async def reschedule_all_tasks():
       CronTrigger(
         minute="1-59/5",
         start_date=order.invoice_pickup_time,
-        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(+1), hour=23, minute=59, second=59),
       ),
       kwargs={
         "storenum": order.store,
@@ -80,7 +80,7 @@ async def reschedule_all_tasks():
       CronTrigger(
         minute="3-59/5",
         start_date=order.invoice_application_time,
-        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(+1), hour=23, minute=59, second=59),
       ),
       kwargs={
         "storenum": order.store,
@@ -102,7 +102,7 @@ async def reschedule_all_tasks():
       CronTrigger(
         minute="1-59/5",
         start_date=order.invoice_pickup_time,
-        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(+1), hour=23, minute=59, second=59),
       ),
       kwargs={
         "storenum": order.store,
@@ -121,7 +121,7 @@ async def reschedule_all_tasks():
       CronTrigger(
         minute="3-59/5",
         start_date=order.invoice_application_time,
-        end_date=order.invoice_application_time + relativedelta(weekday=SA(1), hour=23, minute=59, second=59),
+        end_date=order.invoice_application_time + relativedelta(weekday=SA(+1), hour=23, minute=59, second=59),
       ),
       kwargs={
         "storenum": order.store,
