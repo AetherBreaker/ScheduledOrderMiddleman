@@ -229,4 +229,4 @@ class OrderProcessingScheduler(AsyncIOScheduler):
             else:
               lines.append("  No scheduled jobs")
 
-    logger.info("\n".join(lines))
+    logger.debug("\n".join(lines))
