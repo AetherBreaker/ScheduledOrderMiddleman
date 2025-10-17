@@ -2,7 +2,7 @@ import contextlib
 from asyncio import gather, to_thread
 from copy import deepcopy
 from datetime import datetime
-from ftplib import FTP, _SSLSocket  # type: ignore
+from ftplib import FTP, _SSLSocket, error_perm, error_temp  # type: ignore
 from json import loads
 from logging import getLogger
 from pathlib import Path, PurePosixPath
@@ -82,89 +82,78 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
   destination_ftp_folder: PurePosixPath
 
   def __init__(self, pbar: ProgressCustom = None) -> None:  # type: ignore
-    self.file_queue_backup_folder.mkdir(exist_ok=True)
+    # Only initialize once per singleton instance to prevent queue resets
+    if not hasattr(self, '_initialized'):
+      self.file_queue_backup_folder.mkdir(exist_ok=True)
 
-    self.pickup_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_pickup_queue.json"
-    self.waiting_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_waiting_queue.json"
-    self.application_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_application_queue.json"
+      self.pickup_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_pickup_queue.json"
+      self.waiting_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_waiting_queue.json"
+      self.application_queue_backup_file = self.file_queue_backup_folder / f"{self.queue_backup_prefix}_application_queue.json"
 
-    self.pbar = pbar
+      self._load_queue_backups()
 
-    self._load_queue_backups()
+      self.cache: DatabaseCache = DatabaseCache()
 
-    self.cache: DatabaseCache = DatabaseCache()
+      # Initialize pbar to None if not provided on first call
+      self.pbar = pbar
+
+      self._initialized = True
+
+    # Allow pbar to be updated on subsequent calls (but not set to None)
+    elif pbar is not None:
+      self.pbar = pbar
 
   async def save_queue_backups_off_thread(self) -> None:
     await to_thread(self._save_backups)
 
   def _save_backups(self) -> None:
-    with self.lock:
-      backup = (
-        (
-          self.pickup_queue_backup_file,
-          self.queue_ta.dump_json(self.file_pickup_queue, indent=2, round_trip=True),
-        ),
-        (
-          self.waiting_queue_backup_file,
-          self.queue_ta.dump_json(self.file_waiting_queue, indent=2, round_trip=True),
-        ),
-        (
-          self.application_queue_backup_file,
-          self.queue_ta.dump_json(self.file_application_queue, indent=2, round_trip=True),
-        ),
-      )
-      pass
+    # Note: Called via to_thread, cannot use async locks
+    # Queue serialization is atomic enough for our purposes
+    backup = (
+      (
+        self.pickup_queue_backup_file,
+        self.queue_ta.dump_json(self.file_pickup_queue, indent=2, round_trip=True),
+      ),
+      (
+        self.waiting_queue_backup_file,
+        self.queue_ta.dump_json(self.file_waiting_queue, indent=2, round_trip=True),
+      ),
+      (
+        self.application_queue_backup_file,
+        self.queue_ta.dump_json(self.file_application_queue, indent=2, round_trip=True),
+      ),
+    )
 
-      # for _, bak in backup:
-      #   for k, v in bak.items():
-      #     v["file_pattern"] = v["file_pattern"].pattern
-      #     v["_waiting_folder"] = str(v["_waiting_folder"])
-      #     v["pickup_date"] = v["pickup_date"].isoformat()
-      #     v["dropoff_date"] = v["dropoff_date"].isoformat()
-
-      for file, data in backup:
-        with file.open("wb") as f:
-          f.write(data)
+    for file, data in backup:
+      with file.open("wb") as f:
+        f.write(data)
 
   def _load_queue_backups(self) -> None:
-    with self.lock:
-      to_load = (
-        (
-          self.queue_ta.validate_json(
-            self.pickup_queue_backup_file.read_text() if self.pickup_queue_backup_file.exists() else "{}"
-          ),
-          self.file_pickup_queue,
+    # Note: Called during __init__, no need for lock protection
+    to_load = (
+      (
+        self.queue_ta.validate_json(
+          self.pickup_queue_backup_file.read_text() if self.pickup_queue_backup_file.exists() else "{}"
         ),
-        (
-          self.queue_ta.validate_json(
-            self.waiting_queue_backup_file.read_text() if self.waiting_queue_backup_file.exists() else "{}"
-          ),
-          self.file_waiting_queue,
+        self.file_pickup_queue,
+      ),
+      (
+        self.queue_ta.validate_json(
+          self.waiting_queue_backup_file.read_text() if self.waiting_queue_backup_file.exists() else "{}"
         ),
-        (
-          self.queue_ta.validate_json(
-            self.application_queue_backup_file.read_text() if self.application_queue_backup_file.exists() else "{}"
-          ),
-          self.file_application_queue,
+        self.file_waiting_queue,
+      ),
+      (
+        self.queue_ta.validate_json(
+          self.application_queue_backup_file.read_text() if self.application_queue_backup_file.exists() else "{}"
         ),
-      )
+        self.file_application_queue,
+      ),
+    )
 
-      for loaded, target in to_load:
-        target.clear()
-        target.update(deepcopy(loaded))
-        # for k, v in loaded.items():
-        # target[k] = FileRegisterData(
-        #   storenum=v["storenum"],
-        #   customer_id=v["customer_id"],
-        #   pickup_date=datetime.fromisoformat(v["pickup_date"]),
-        #   dropoff_date=datetime.fromisoformat(v["dropoff_date"]),
-        #   file_pattern=compile(v["file_pattern"]),
-        #   current_week=v["current_week"],
-        #   _waiting_folder=self.waiting_folder,
-        #   file_name=v.get("file_name", []),
-        #   pickup_success=v.get("pickup_success", {}),
-        #   application_success=v.get("application_success", {}),
-        # )
+    for loaded, target in to_load:
+      target.clear()
+      target.update(deepcopy(loaded))
 
   async def register_pickup(
     self, storenum: StoreNum, customer_id: CustomerID, pickup_date: datetime, dropoff_date: datetime, current_week: bool = True
@@ -180,9 +169,13 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
     if not self.file_application_queue:
       return
     async with self.lock:
-      with self.pbar.add_task(
-        "Moving files to application folder", total=sum(len(v.file_name) for v in self.file_application_queue.values())
-      ) as files_move_task:
+      # Use pbar context manager if available, otherwise use a dummy context
+      pbar_context = (
+        self.pbar.add_task("Moving files to application folder", total=sum(len(v.file_name) for v in self.file_application_queue.values()))
+        if self.pbar
+        else contextlib.nullcontext(None)
+      )
+      with pbar_context as files_move_task:
         futures = []
         for key, file_meta in tuple(self.file_application_queue.items()):
           futures.extend(
@@ -213,13 +206,15 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
       file_size = origin_client.stat(send_path.as_posix()).st_size
       with SFTFTPClient(self.sft_ftp_creds) as dest_client:
         dest_client.voidcmd("TYPE I")
-        with self.pbar.add_task(f"Transferring {send_path.name}") as transfer_task:
+        transfer_pbar_context = self.pbar.add_task(f"Transferring {send_path.name}") if self.pbar else contextlib.nullcontext(None)
+        with transfer_pbar_context as transfer_task:
           with origin_client.open(send_path.as_posix(), "rb") as read_file:
             read_file.prefetch(file_size)
             with dest_client.transfercmd(f"STOR {recv_path.as_posix()}") as write_file:
               while buffer := read_file.read(8192):
                 write_file.sendall(buffer)
-                self.pbar.update(transfer_task, advance=len(buffer))
+                if self.pbar and transfer_task is not None:
+                  self.pbar.update(transfer_task, advance=len(buffer))
               if _SSLSocket is not None and isinstance(write_file, _SSLSocket):
                 write_file.unwrap()  # type: ignore
             dest_client.voidresp()
@@ -228,12 +223,16 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
           extra={"markup": True},
         )
 
+        # Verify file was transferred successfully
         success = False
-        with contextlib.suppress(Exception):
+        try:
           dest_client.size(recv_path.as_posix())
           success = True
+        except (error_perm, error_temp, OSError) as e:
+          logger.warning(f"{self.__class__.__name__}: Failed to verify transfer of {send_path.name}: {e}")
         file_meta.pickup_success[idx] = success
-    self.pbar.update(move_files_task, advance=1)
+    if self.pbar and move_files_task is not None:
+      self.pbar.update(move_files_task, advance=1)
     return success
 
   def _transfer_file_main_to_main(
@@ -243,14 +242,18 @@ class SupplierProcessorBase[T_VendorFTP](metaclass=SingletonType):
       origin_client.voidcmd("TYPE I")
       origin_client.rename(send_path.as_posix(), recv_path.as_posix())
 
+      # Verify file was moved successfully
       success = False
-      with contextlib.suppress(Exception):
+      try:
         origin_client.size(recv_path.as_posix())
         success = True
         logger.info(f"{self.__class__.__name__}: Moved [yellow]{send_path}[/] to [yellow]{recv_path}[/]", extra={"markup": True})
+      except (error_perm, error_temp, OSError) as e:
+        logger.warning(f"{self.__class__.__name__}: Failed to verify move of {send_path.name}: {e}")
       file_meta.application_success[idx] = success
 
-    self.pbar.update(move_files_task, advance=1)
+    if self.pbar and move_files_task is not None:
+      self.pbar.update(move_files_task, advance=1)
 
 
 class SFTFTPClient(FTP):

@@ -224,97 +224,99 @@ class DatabaseCache(metaclass=SingletonType):
     if not self.queued_updates:
       return
 
-    await to_thread(self._api_write)
+    # Acquire async locks before running in thread pool
+    async with self._api_write_lock, self._update_queue_lock:
+      await to_thread(self._api_write)
 
   def _api_write(self):
-    with self._api_write_lock, self._update_queue_lock:
-      self.client.http_client.values_batch_update(
-        id=self._database_id,
-        body=self._update_body,
-      )
+    # Locks are acquired by caller (submit_queued_writes_to_pool)
+    self.client.http_client.values_batch_update(
+      id=self._database_id,
+      body=self._update_body,
+    )
 
-      self._update_body = None  # Reset the update body after writing
+    self._update_body = None  # Reset the update body after writing
 
   async def flip_to_new_week(self):
-    async with self._update_queue_lock:
-      await self.submit_queued_writes_to_pool()
+    # Flush all pending writes before flipping sheets
+    await self.submit_queued_writes_to_pool()
 
-      async with self._api_write_lock:
-        await self.wait_for_api()
+    async with self._api_write_lock:
+      await self.wait_for_api()
 
-        metadat = self.client.http_client.fetch_sheet_metadata(self._database_id)
+      metadat = self.client.http_client.fetch_sheet_metadata(self._database_id)
 
-        current_week_sheet = finditem(lambda x: x["properties"]["title"] == "Current Week", metadat["sheets"])
-        previous_week_sheet = finditem(lambda x: x["properties"]["title"] == "Previous Week", metadat["sheets"])
+      current_week_sheet = finditem(lambda x: x["properties"]["title"] == "Current Week", metadat["sheets"])
+      previous_week_sheet = finditem(lambda x: x["properties"]["title"] == "Previous Week", metadat["sheets"])
 
-        all_sheet_ids = [int(s["properties"]["sheetId"]) for s in metadat["sheets"]]
+      all_sheet_ids = [int(s["properties"]["sheetId"]) for s in metadat["sheets"]]
 
-        new_sheet_id = max(all_sheet_ids) + 1
+      new_sheet_id = max(all_sheet_ids) + 1
 
-        try:
-          finditem(lambda x: x["properties"]["title"] == self.get_week_ending_name, metadat["sheets"])
-          logger.warning(
-            "Attempted to flip week more than once in the same week."
-            "\n Or a sheet exists with the same name as the most recent week ending name."
-          )
-          return  # already done this week
-        except StopIteration:
-          pass
+      try:
+        finditem(lambda x: x["properties"]["title"] == self.get_week_ending_name, metadat["sheets"])
+        logger.warning(
+          "Attempted to flip week more than once in the same week."
+          "\n Or a sheet exists with the same name as the most recent week ending name."
+        )
+        return  # already done this week
+      except StopIteration:
+        pass
 
-        request_body = {
-          "requests": [
-            {
-              "updateSheetProperties": {
-                "properties": {
-                  "sheetId": previous_week_sheet["properties"]["sheetId"],
-                  "title": self.get_week_ending_name,
-                  "hidden": True,
+      request_body = {
+        "requests": [
+          {
+            "updateSheetProperties": {
+              "properties": {
+                "sheetId": previous_week_sheet["properties"]["sheetId"],
+                "title": self.get_week_ending_name,
+                "hidden": True,
+              },
+              "fields": "title,hidden",
+            }
+          },
+          {
+            "updateSheetProperties": {
+              "properties": {
+                "sheetId": current_week_sheet["properties"]["sheetId"],
+                "title": "Previous Week",
+              },
+              "fields": "title",
+            }
+          },
+          {
+            "duplicateSheet": {
+              "sourceSheetId": self._tab_id_schedule_base_sheet,
+              "insertSheetIndex": len(metadat["sheets"]),
+              "newSheetId": new_sheet_id,
+              "newSheetName": "Current Week",
+            }
+          },
+          {
+            "addProtectedRange": {
+              "protectedRange": {
+                "range": {
+                  "sheetId": new_sheet_id,
+                  "startRowIndex": 0,
+                  "startColumnIndex": 0,
                 },
-                "fields": "title,hidden",
-              }
-            },
-            {
-              "updateSheetProperties": {
-                "properties": {
-                  "sheetId": current_week_sheet["properties"]["sheetId"],
-                  "title": "Previous Week",
+                "description": None,
+                "warningOnly": False,
+                "requestingUserCanEdit": True,
+                "editors": {
+                  "users": [
+                    "aetherbreaker7777@gmail.com",
+                    "scheduling-service@order-scheduling-processor.iam.gserviceaccount.com",
+                  ],
+                  "groups": [],
                 },
-                "fields": "title",
               }
-            },
-            {
-              "duplicateSheet": {
-                "sourceSheetId": self._tab_id_schedule_base_sheet,
-                "insertSheetIndex": len(metadat["sheets"]),
-                "newSheetId": new_sheet_id,
-                "newSheetName": "Current Week",
-              }
-            },
-            {
-              "addProtectedRange": {
-                "protectedRange": {
-                  "range": {
-                    "sheetId": new_sheet_id,
-                    "startRowIndex": 0,
-                    "startColumnIndex": 0,
-                  },
-                  "description": None,
-                  "warningOnly": False,
-                  "requestingUserCanEdit": True,
-                  "editors": {
-                    "users": [
-                      "aetherbreaker7777@gmail.com",
-                      "scheduling-service@order-scheduling-processor.iam.gserviceaccount.com",
-                    ],
-                    "groups": [],
-                  },
-                }
-              }
-            },
-          ]
-        }
+            }
+          },
+        ]
+      }
 
-        self.client.http_client.batch_update(self._database_id, request_body)
+      self.client.http_client.batch_update(self._database_id, request_body)
 
     await self.refresh_cache()
 
@@ -382,8 +384,10 @@ class CacheViewBase[ModelT: CustomBaseModel]:
 
     if isinstance(row_number, slice):
       row_number = int(row_number.stop - row_number.start)
-    if (not isinstance(row_number, int)) or (0 < row_number < 1):
+    if not isinstance(row_number, int):
       raise IndexError("Index provided is either a partial index, or otherwise fails to return a single row")
+    if row_number < 0 or row_number >= len(self._cache):
+      raise IndexError(f"Row number {row_number} out of bounds for cache with {len(self._cache)} rows")
 
     return row_number
 

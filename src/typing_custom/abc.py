@@ -4,8 +4,7 @@ if __name__ == "__main__":
   configure_logging()
 
 from logging import getLogger
-
-from aiologic import Lock
+from threading import Lock
 
 logger = getLogger(__name__)
 
@@ -21,7 +20,10 @@ class SingletonType(type):
   def __call__(self, *args, **kwargs):
     with self.__shared_instance_lock__:
       try:
-        return self.__shared_instance__
+        instance = self.__shared_instance__
+        # Call __init__ on existing instance to allow updates (e.g., pbar)
+        instance.__init__(*args, **kwargs)
+        return instance
       except AttributeError:
         self.__shared_instance__ = super(SingletonType, self).__call__(*args, **kwargs)
         return self.__shared_instance__

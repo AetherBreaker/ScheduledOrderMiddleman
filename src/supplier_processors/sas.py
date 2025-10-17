@@ -1,4 +1,5 @@
 from asyncio import gather, to_thread
+from contextlib import nullcontext
 from datetime import datetime
 from json import loads
 from logging import getLogger
@@ -91,7 +92,9 @@ class SASProcessor(SupplierProcessorBase):
       _waiting_folder=self.waiting_folder,
     )
 
-    self.file_pickup_queue[self.assemble_queue_key(storenum, customer_id, pickup_date)] = register_data
+    # Protect queue modification with lock for consistency
+    async with self.lock:
+      self.file_pickup_queue[self.assemble_queue_key(storenum, customer_id, pickup_date)] = register_data
     logger.info(f"{self.__class__.__name__}: Added {storenum} to pickup queue")
 
   async def register_application(
@@ -116,21 +119,23 @@ class SASProcessor(SupplierProcessorBase):
       )
       return
 
-    # first check if key is already in application queue
-    if key not in self.file_application_queue:
-      try:
-        matched_item = self.file_waiting_queue.pop(key)
-      except KeyError:
-        logger.error(
-          f"{self.__class__.__name__}: No waiting file found for: {self.supplier_name}, {storenum}, {customer_id}, {pickup_date.isoformat()}\n"
-          f"Invoice may not have been picked up or is missing!"
-        )
-        return
+    # Protect queue operations with lock to prevent race conditions
+    async with self.lock:
+      # first check if key is already in application queue
+      if key not in self.file_application_queue:
+        try:
+          matched_item = self.file_waiting_queue.pop(key)
+        except KeyError:
+          logger.error(
+            f"{self.__class__.__name__}: No waiting file found for: {self.supplier_name}, {storenum}, {customer_id}, {pickup_date.isoformat()}\n"
+            f"Invoice may not have been picked up or is missing!"
+          )
+          return
 
-      self.file_application_queue[key] = matched_item
-      logger.info(f"{self.__class__.__name__}: Moved {matched_item.storenum} from waiting to application queue")
-    else:
-      logger.warning(f"{self.__class__.__name__}: File already registered for application: {key}")
+        self.file_application_queue[key] = matched_item
+        logger.info(f"{self.__class__.__name__}: Moved {matched_item.storenum} from waiting to application queue")
+      else:
+        logger.warning(f"{self.__class__.__name__}: File already registered for application: {key}")
 
   def assemble_queue_key(self, storenum: StoreNum, customer_id: CustomerID, pickup_date: datetime) -> str:
     return f"{storenum}-{customer_id}-{pickup_date.isoformat()}"
@@ -212,7 +217,12 @@ class SASProcessor(SupplierProcessorBase):
         else:
           logger.warning(f"{self.__class__.__name__}: No files matched for: {key} with pattern {file_meta.file_pattern.pattern}")
 
-      with self.pbar.add_task("Transferring Files", total=sum(len(v.file_name) for v in items_to_dl.values())) as move_files_task:
+      pbar_context = (
+        self.pbar.add_task("Transferring Files", total=sum(len(v.file_name) for v in items_to_dl.values()))
+        if self.pbar
+        else nullcontext(None)
+      )
+      with pbar_context as move_files_task:
         dl_futures = []
         for file_meta in items_to_dl.values():
           dl_futures.extend(
@@ -241,10 +251,11 @@ class SASProcessor(SupplierProcessorBase):
 
       await gather(*archive_futures)
 
-    for key, item in items_to_advance.items():
-      self.file_waiting_queue[key] = item
-      self.file_pickup_queue.pop(key)
-      logger.info(f"{self.__class__.__name__}: Moved {item.storenum} to waiting queue")
+      # Move items to waiting queue while still holding lock
+      for key, item in items_to_advance.items():
+        self.file_waiting_queue[key] = item
+        self.file_pickup_queue.pop(key)
+        logger.info(f"{self.__class__.__name__}: Moved {item.storenum} to waiting queue")
 
 
 # async def main():
